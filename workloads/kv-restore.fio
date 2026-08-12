@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Concurrent sequence resume: each job is one evicted sequence pulling its
+# KV extents back; QD2 models restore pipelining. Whole-extent p99 is the
+# TTFT proxy.
+[global]
+filename=${DEV}
+size=${SIZE}
+direct=1
+ioengine=io_uring
+time_based
+runtime=20
+ramp_time=3
+norandommap
+randrepeat=0
+iomem=mmaphuge
+group_reporting
+
+[kv_restore]
+bs=2M
+rw=randread
+iodepth=2
+numjobs=16

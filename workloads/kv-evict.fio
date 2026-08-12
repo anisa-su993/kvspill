@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Eviction flush: sequences demoted to the storage tier under KV memory
+# pressure - the write half of the offload cycle. Interpret with an
+# SLC-cache caveat on consumer drives.
+[global]
+filename=${DEV}
+size=${SIZE}
+direct=1
+ioengine=io_uring
+time_based
+runtime=20
+ramp_time=3
+norandommap
+randrepeat=0
+iomem=mmaphuge
+group_reporting
+
+[kv_evict]
+bs=2M
+rw=write
+iodepth=8
+numjobs=4
+offset_increment=25g

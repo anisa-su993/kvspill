@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# The interference case: bulk restores sharing a device with
+# latency-sensitive small reads (block tables, embeddings, other tenants).
+# Per-job reporting on purpose - qos_small's p99 under storm is the result.
+[global]
+filename=${DEV}
+size=${SIZE}
+direct=1
+ioengine=io_uring
+time_based
+runtime=20
+ramp_time=3
+norandommap
+randrepeat=0
+
+[qos_big]
+bs=2M
+rw=randread
+iodepth=8
+numjobs=4
+iomem=mmaphuge
+
+[qos_small]
+bs=4k
+rw=randread
+iodepth=16
+numjobs=2

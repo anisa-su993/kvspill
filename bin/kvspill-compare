@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+"""A/B compare two kvspill RESULT logs: median per (case, job, dir, metric)."""
+import statistics
+import sys
+
+def load(path):
+    d = {}
+    for line in open(path):
+        if not line.startswith("RESULT"):
+            continue
+        kv = dict(f.split("=", 1) for f in line.split()[1:])
+        key = (kv["case"], kv.get("job", "-"), kv.get("dir", "read"))
+        m = d.setdefault(key, {})
+        for k, v in kv.items():
+            if k in ("case", "job", "dir", "rep"):
+                continue
+            m.setdefault(k, []).append(float(v))
+    return d
+
+if len(sys.argv) != 3:
+    sys.exit("usage: kvspill-compare A.log B.log")
+a, b = load(sys.argv[1]), load(sys.argv[2])
+print("%-34s %12s %12s %8s" % ("case/job metric", "A", "B", "delta"))
+for key in sorted(set(a) | set(b)):
+    label = "%s/%s%s" % (key[0], key[1],
+                         " (w)" if key[2] == "write" else "")
+    for m in ("bw_MiBps", "iops", "p50_us", "p99_us", "sys", "irq_per_gb"):
+        va, vb = a.get(key, {}).get(m), b.get(key, {}).get(m)
+        if not va or not vb:
+            continue
+        ma, mb = statistics.median(va), statistics.median(vb)
+        delta = " n/a" if ma == 0 else "%+.1f%%" % ((mb - ma) / ma * 100)
+        print("%-34s %12.1f %12.1f %8s" % (f"{label} {m}", ma, mb, delta))

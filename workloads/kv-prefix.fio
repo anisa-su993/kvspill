@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Prefix-cache reload: shared system-prompt/context KV written once,
+# streamed back in order; several tenants concurrently.
+[global]
+filename=${DEV}
+size=${SIZE}
+direct=1
+ioengine=io_uring
+time_based
+runtime=20
+ramp_time=3
+iomem=mmaphuge
+group_reporting
+
+[kv_prefix]
+bs=1M
+rw=read
+iodepth=4
+numjobs=8
+offset_increment=12g

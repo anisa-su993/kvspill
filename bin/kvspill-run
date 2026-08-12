@@ -1,0 +1,82 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# kvspill driver: gates, blank-check, precondition-once, run the workload
+# set, emit RESULT lines.
+set -u
+
+usage() {
+	echo "usage: $0 /dev/nvmeXnY [--msk KB] [--reps N] [--size GiB] [--force] [--out FILE]" >&2
+	exit 1
+}
+
+DEV=${1:-}; shift || usage
+[ -b "$DEV" ] || usage
+MSK=""; REPS=3; SIZEG=100; FORCE=0; OUT=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--msk) MSK=$2; shift 2 ;;
+	--reps) REPS=$2; shift 2 ;;
+	--size) SIZEG=$2; shift 2 ;;
+	--force) FORCE=1; shift ;;
+	--out) OUT=$2; shift 2 ;;
+	*) usage ;;
+	esac
+done
+D=$(basename "$DEV")
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+[ -n "$OUT" ] || OUT="kvspill-$D-$(date +%Y%m%d-%H%M%S).log"
+say() { echo "$@" | tee -a "$OUT"; }
+
+# ---- safety: refuse non-blank devices --------------------------------------
+if [ "$FORCE" -eq 0 ]; then
+	lsblk -n "$DEV" | grep -q part && { echo "refusing: $DEV has partitions (--force to override)" >&2; exit 1; }
+	[ -n "$(ls /sys/block/$D/holders 2>/dev/null)" ] && { echo "refusing: $DEV has holders" >&2; exit 1; }
+	findmnt -S "$DEV" >/dev/null && { echo "refusing: $DEV is mounted" >&2; exit 1; }
+	wipefs -n "$DEV" 2>/dev/null | grep -q . && { echo "refusing: $DEV has fs signatures (--force to override)" >&2; exit 1; }
+fi
+
+# ---- gates ------------------------------------------------------------------
+SERIAL=$(cat /sys/block/$D/device/serial 2>/dev/null | tr -d ' ')
+say "GATE dev=$DEV serial=$SERIAL model=$(cat /sys/block/$D/device/model 2>/dev/null | tr -d ' ')"
+say "GATE kver=$(uname -r) max_hw_sectors_kb=$(cat /sys/block/$D/queue/max_hw_sectors_kb) max_sectors_kb=$(cat /sys/block/$D/queue/max_sectors_kb)"
+CTRL=${D%n*}
+say "GATE mdts=$(nvme id-ctrl /dev/$CTRL 2>/dev/null | awk '/^mdts/{print $3}')"
+PCIDEV=$(readlink -f /sys/block/$D/device/device 2>/dev/null | grep -oE '[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1)
+for g in /sys/kernel/iommu_groups/*/devices/$PCIDEV; do
+	[ -e "$g" ] && say "GATE iommu_group_type=$(cat $(dirname $(dirname $g))/type)"
+done
+if [ -n "$MSK" ]; then
+	echo "$MSK" > /sys/block/$D/queue/max_sectors_kb
+	say "GATE msk_set=$(cat /sys/block/$D/queue/max_sectors_kb)"
+fi
+echo 2048 > /proc/sys/vm/nr_hugepages
+
+# ---- precondition once per drive (deallocated-read trap) -------------------
+MARK="/var/tmp/kvspill-precond-$SERIAL"
+if [ ! -f "$MARK" ]; then
+	say "PRECONDITION writing ${SIZEG}g to $DEV"
+	fio --name=pre --filename=$DEV --rw=write --bs=1M --iodepth=32 \
+	    --direct=1 --size=${SIZEG}g --ioengine=io_uring \
+	    --output-format=terse >/dev/null && touch "$MARK"
+fi
+
+irq_sum() { awk '/nvme/{for(i=2;i<NF-2;i++) s+=$i} END{print s+0}' /proc/interrupts; }
+
+run() {
+	local name=$1 rep=$2; shift 2
+	local json=/tmp/kvspill-$name-r$rep.json i0 i1
+	i0=$(irq_sum)
+	DEV=$DEV SIZE=${SIZEG}g fio --output-format=json --output=$json "$@" \
+		>/dev/null 2>&1
+	i1=$(irq_sum)
+	python3 "$HERE/bin/parse-fio.py" "$json" "$name" "$rep" "$((i1-i0))" \
+		| tee -a "$OUT"
+}
+
+for rep in $(seq 1 $REPS); do
+	run kv-restore $rep "$HERE/workloads/kv-restore.fio"
+	run kv-prefix  $rep "$HERE/workloads/kv-prefix.fio"
+	run kv-qos     $rep "$HERE/workloads/kv-qos.fio"
+	run kv-evict   $rep "$HERE/workloads/kv-evict.fio"
+done
+say "KVSPILL_DONE dev=$DEV msk=${MSK:-default} out=$OUT"
