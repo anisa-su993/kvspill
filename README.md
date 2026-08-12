@@ -88,16 +88,6 @@ that make results interpretable (`max_hw_sectors_kb`, `max_sectors_kb`,
 IOMMU domain type, MDTS), and emits one parseable `RESULT` line per job
 per rep.
 
-## Repository layout
-
-- `workloads/` — fio job files (generic shapes + calibrated variants)
-- `profiles/` — measured stack profiles and their capture data
-- `bin/kvspill-run`, `bin/kvspill-compare`, `bin/parse-fio.py`
-- `docs/patterns.md` — the pattern↔workload mapping, fidelity and limits
-- `docs/roadmap.md` — enhancement plan (calibration: done; open-loop
-  arrivals, sequence-completion latency, filesystem/writeback mode, device
-  characterization, CI smoke mode)
-
 ## Hard-won details baked in
 
 - fio options after a `--name` are job-local: in multi-job invocations
