@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Calibrated restore shape (see profiles/lmcache-qwen2.5-1.5b.md):
+# LMCache-class stacks issue whole-object reads (7MiB for a 1.5B model at
+# chunk_size=256; 32MiB for 8B GQA) from a small synchronous worker pool.
+[global]
+filename=${DEV}
+size=${SIZE}
+direct=1
+ioengine=io_uring
+time_based
+runtime=20
+ramp_time=3
+norandommap
+randrepeat=0
+iomem=mmaphuge
+group_reporting
+
+[kv_restore_calibrated]
+bs=7m
+rw=randread
+iodepth=1
+numjobs=4

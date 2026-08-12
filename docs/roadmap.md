@@ -2,7 +2,7 @@
 
 Ranked by how much realism each buys per unit of work.
 
-## 1. Calibrate extent sizes against real stacks (highest value)
+## 1. Calibrate extent sizes against real stacks — DONE 2026-08-12
 Today's fixed 1-2MB extents are an informed guess. Instrument a real
 vLLM+LMCache deployment (strace/eBPF on the disk backend) and capture the
 actual distribution of I/O sizes, queue depths and arrival gaps, then feed
