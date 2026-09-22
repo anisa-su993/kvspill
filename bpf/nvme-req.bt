@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// Driver-level per-request cost: nvme_map_data() and nvme_unmap_data()
+// wrap everything nvme-pci does to make a request DMA-ready (DMA API calls
+// plus PRP/SGL list construction and pool allocation). Same symbols on both
+// the scatterlist and the two-step kernels, so this is the like-for-like
+// total; the API-level maps say where inside it the time went.
+//
+// Both are static and may be inlined; kvspill-dmacost only appends this
+// fragment when they are present in kallsyms. Signatures differ between
+// eras (request is arg2 before v6.17, arg0 after), so only latency is
+// recorded, not size.
+
+kprobe:nvme_map_data
+{
+	@ts_nmap[tid] = nsecs;
+}
+
+kretprobe:nvme_map_data
+/@ts_nmap[tid]/
+{
+	@nvme_map_ns = hist(nsecs - @ts_nmap[tid]);
+	@nvme_map_avg_ns = avg(nsecs - @ts_nmap[tid]);
+	delete(@ts_nmap[tid]);
+}
+
+kprobe:nvme_unmap_data
+{
+	@ts_nunmap[tid] = nsecs;
+}
+
+kretprobe:nvme_unmap_data
+/@ts_nunmap[tid]/
+{
+	@nvme_unmap_ns = hist(nsecs - @ts_nunmap[tid]);
+	@nvme_unmap_avg_ns = avg(nsecs - @ts_nunmap[tid]);
+	delete(@ts_nunmap[tid]);
+}
+
+END
+{
+	clear(@ts_nmap);
+	clear(@ts_nunmap);
+}

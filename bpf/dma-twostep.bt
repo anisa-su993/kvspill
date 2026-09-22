@@ -1,0 +1,177 @@
+#!/usr/bin/env bpftrace
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// DMA map/unmap cost on the two-step DMA API (nvme-pci >= v6.17).
+//
+// Map side, per request:  blk_rq_dma_map_iter_start() tries
+// dma_iova_try_alloc(); on success the whole request is linked into one
+// IOVA range (dma_iova_link per physical segment, then dma_iova_sync) and
+// blk_rq_dma_map_iter_next() has nothing left to do. If the IOVA path is
+// unavailable (no IOMMU, passthrough, swiotlb) each segment is mapped
+// directly instead: iter_start maps the first, iter_next the rest.
+//
+// Unmap side: dma_iova_destroy() for the IOVA path (one call per request),
+// or per-segment dma_unmap_{phys,page_attrs} on the direct path.
+//
+// Single-segment requests skip the iterator entirely (nvme_pci_setup_data_simple)
+// and show up only in the per-segment maps supplied by the seg-*.bt fragment
+// that kvspill-dmacost appends.
+//
+// Only devices bound to the "nvme" driver are traced. Needs kernel BTF.
+// Keys of the *_ns maps are request-size buckets in KiB (upper bound).
+
+BEGIN
+{
+	printf("two-step DMA: tracing nvme devices, Ctrl-C to report\n");
+}
+
+// ---- whole-request map cost: iter_start + every iter_next -------------
+
+kprobe:blk_rq_dma_map_iter_start
+/str(((struct device *)arg1)->driver->name) == "nvme"/
+{
+	@rq[tid] = arg0;
+	@rq_sz[arg0] = ((struct request *)arg0)->__data_len;
+	@rq_ns[arg0] = (uint64)0;
+	@ts_start[tid] = nsecs;
+}
+
+kretprobe:blk_rq_dma_map_iter_start
+/@ts_start[tid]/
+{
+	$d = nsecs - @ts_start[tid];
+	$r = @rq[tid];
+	delete(@ts_start[tid]);
+	delete(@rq[tid]);
+
+	@iter_start_ns = hist($d);
+	@rq_ns[$r] += $d;
+	if (retval == 0) {
+		// mapping failed; nothing further will flush this request
+		@map_fail = count();
+		delete(@rq_ns[$r]);
+		delete(@rq_sz[$r]);
+	}
+}
+
+kprobe:blk_rq_dma_map_iter_next
+/@rq_sz[arg0]/
+{
+	@rq[tid] = arg0;
+	@ts_next[tid] = nsecs;
+}
+
+kretprobe:blk_rq_dma_map_iter_next
+/@ts_next[tid]/
+{
+	$d = nsecs - @ts_next[tid];
+	$r = @rq[tid];
+	delete(@ts_next[tid]);
+	delete(@rq[tid]);
+
+	@iter_next_ns = hist($d);
+	@rq_ns[$r] += $d;
+
+	// false == iteration finished: the request is fully mapped
+	if (retval == 0) {
+		$kb = @rq_sz[$r] / 1024;
+		$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
+		     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
+		     ($kb <= 2048 ? 2048 : 8192)))));
+		@map_req_ns[$b] = hist(@rq_ns[$r]);
+		@map_req_avg_ns[$b] = avg(@rq_ns[$r]);
+		@map_req_count[$b] = count();
+		delete(@rq_ns[$r]);
+		delete(@rq_sz[$r]);
+	}
+}
+
+// ---- IOVA path primitives ----------------------------------------------
+
+kprobe:dma_iova_try_alloc
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_alloc[tid] = nsecs;
+}
+
+kretprobe:dma_iova_try_alloc
+/@ts_alloc[tid]/
+{
+	@iova_alloc_ns = hist(nsecs - @ts_alloc[tid]);
+	@path[retval ? "iova" : "direct"] = count();
+	delete(@ts_alloc[tid]);
+}
+
+kprobe:dma_iova_link
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_link[tid] = nsecs;
+	@iova_link_bytes = sum(arg4);
+}
+
+kretprobe:dma_iova_link
+/@ts_link[tid]/
+{
+	@iova_link_ns = hist(nsecs - @ts_link[tid]);
+	@iova_link_avg_ns = avg(nsecs - @ts_link[tid]);
+	delete(@ts_link[tid]);
+}
+
+kprobe:dma_iova_sync
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_sync[tid] = nsecs;
+}
+
+kretprobe:dma_iova_sync
+/@ts_sync[tid]/
+{
+	@iova_sync_ns = hist(nsecs - @ts_sync[tid]);
+	@iova_sync_avg_ns = avg(nsecs - @ts_sync[tid]);
+	delete(@ts_sync[tid]);
+}
+
+// ---- IOVA path unmap: one dma_iova_destroy() per request ---------------
+
+kprobe:dma_iova_destroy
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_destroy[tid] = nsecs;
+	@destroy_len[tid] = arg2;
+}
+
+kretprobe:dma_iova_destroy
+/@ts_destroy[tid]/
+{
+	$d = nsecs - @ts_destroy[tid];
+	$kb = @destroy_len[tid] / 1024;
+	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
+	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
+	     ($kb <= 2048 ? 2048 : 8192)))));
+	@unmap_req_ns[$b] = hist($d);
+	@unmap_req_avg_ns[$b] = avg($d);
+	@unmap_req_count[$b] = count();
+	delete(@ts_destroy[tid]);
+	delete(@destroy_len[tid]);
+}
+
+// error-path unlink (partial map failed); should stay at zero
+kprobe:dma_iova_unlink
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@iova_unlink = count();
+}
+
+END
+{
+	clear(@rq);
+	clear(@rq_sz);
+	clear(@rq_ns);
+	clear(@ts_start);
+	clear(@ts_next);
+	clear(@ts_alloc);
+	clear(@ts_link);
+	clear(@ts_sync);
+	clear(@ts_destroy);
+	clear(@destroy_len);
+}

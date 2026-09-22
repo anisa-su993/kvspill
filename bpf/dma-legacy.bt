@@ -1,0 +1,77 @@
+#!/usr/bin/env bpftrace
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// DMA map/unmap cost on the scatterlist DMA API (nvme-pci < v6.17).
+//
+// Map side, per request: nvme_map_data() builds a scatterlist with
+// blk_rq_map_sg() and hands it to dma_map_sgtable() in one call.
+// Unmap side: dma_unmap_sgtable() is inline and lands in dma_unmap_sg_attrs().
+//
+// Single-segment requests (<= 2 pages) skip the scatterlist and use
+// dma_map_bvec() -> dma_map_page_attrs(); those show up only in the
+// per-segment maps supplied by seg-page.bt, which kvspill-dmacost appends.
+//
+// Only devices bound to the "nvme" driver are traced. Needs kernel BTF.
+// Keys of the sg_* maps are scatterlist entry-count buckets (upper bound).
+// With hugepage-backed buffers a 2MB request is a handful of entries; with
+// 4K pages it is up to 256 (the NVMe segment budget), so nents tracks
+// request size only loosely. Compare against the kvspill-run GATE lines.
+
+BEGIN
+{
+	printf("scatterlist DMA: tracing nvme devices, Ctrl-C to report\n");
+}
+
+kprobe:dma_map_sgtable
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_map[tid] = nsecs;
+	@map_n[tid] = ((struct sg_table *)arg1)->orig_nents;
+}
+
+kretprobe:dma_map_sgtable
+/@ts_map[tid]/
+{
+	$d = nsecs - @ts_map[tid];
+	$n = @map_n[tid];
+	$b = $n <= 1 ? 1 : ($n <= 4 ? 4 : ($n <= 16 ? 16 :
+	     ($n <= 64 ? 64 : ($n <= 256 ? 256 : 1024))));
+	@sg_map_ns[$b] = hist($d);
+	@sg_map_avg_ns[$b] = avg($d);
+	@sg_map_count[$b] = count();
+	@sg_map_nents = hist($n);
+	if (retval != 0) {
+		@map_fail = count();
+	}
+	delete(@ts_map[tid]);
+	delete(@map_n[tid]);
+}
+
+kprobe:dma_unmap_sg_attrs
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_unmap[tid] = nsecs;
+	@unmap_n[tid] = arg2;
+}
+
+kretprobe:dma_unmap_sg_attrs
+/@ts_unmap[tid]/
+{
+	$d = nsecs - @ts_unmap[tid];
+	$n = @unmap_n[tid];
+	$b = $n <= 1 ? 1 : ($n <= 4 ? 4 : ($n <= 16 ? 16 :
+	     ($n <= 64 ? 64 : ($n <= 256 ? 256 : 1024))));
+	@sg_unmap_ns[$b] = hist($d);
+	@sg_unmap_avg_ns[$b] = avg($d);
+	@sg_unmap_count[$b] = count();
+	delete(@ts_unmap[tid]);
+	delete(@unmap_n[tid]);
+}
+
+END
+{
+	clear(@ts_map);
+	clear(@map_n);
+	clear(@ts_unmap);
+	clear(@unmap_n);
+}

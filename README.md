@@ -88,6 +88,22 @@ that make results interpretable (`max_hw_sectors_kb`, `max_sectors_kb`,
 IOMMU domain type, MDTS), and emits one parseable `RESULT` line per job
 per rep.
 
+## Measuring DMA map/unmap cost
+
+`bin/kvspill-dmacost` wraps a workload in bpftrace and reports how long
+nvme-pci spends mapping and unmapping requests in the DMA API, so the
+scatterlist path (< v6.17) and the two-step IOVA path (>= v6.17) can be
+compared on the same drive and workload:
+
+```
+kvspill-dmacost -- fio workloads/kv-restore-calibrated.fio
+```
+
+It picks the probe set from the running kernel's symbols and prints GATE
+lines (kernel, DMA mode, per-controller IOMMU domain type) ahead of the
+per-request and per-segment latency histograms. See `bpf/README.md` for
+what each map means.
+
 ## Hard-won details baked in
 
 - fio options after a `--name` are job-local: in multi-job invocations

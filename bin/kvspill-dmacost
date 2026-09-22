@@ -1,0 +1,102 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+# kvspill-dmacost: measure NVMe DMA map/unmap cost with bpftrace while a
+# workload runs. Picks the two-step (>= v6.17) or scatterlist (< v6.17)
+# probe set from the running kernel's symbols and emits GATE lines so the
+# report is interpretable next to kvspill-run output.
+set -u
+
+usage() {
+	cat >&2 <<USAGE
+usage: $0 [--out FILE] -- <command...>
+       $0 [--out FILE] --duration SECONDS
+USAGE
+	exit 1
+}
+
+OUT=""; DUR=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--out) OUT=$2; shift 2 ;;
+	--duration) DUR=$2; shift 2 ;;
+	--) shift; break ;;
+	*) usage ;;
+	esac
+done
+[ $# -gt 0 ] || [ -n "$DUR" ] || usage
+[ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
+command -v bpftrace >/dev/null || { echo "bpftrace not installed" >&2; exit 1; }
+[ -r /sys/kernel/btf/vmlinux ] || { echo "kernel BTF missing; struct casts in the probes need it" >&2; exit 1; }
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+[ -n "$OUT" ] || OUT="kvspill-dmacost-$(date +%Y%m%d-%H%M%S).log"
+say() { echo "$@" | tee -a "$OUT"; }
+
+have_sym() { grep -qE " [tT] $1\$" /proc/kallsyms; }
+
+# ---- choose probe set from the running kernel ------------------------------
+if have_sym blk_rq_dma_map_iter_start; then
+	MODE=twostep
+	MAIN=$HERE/bpf/dma-twostep.bt
+	for s in dma_iova_try_alloc dma_iova_link dma_iova_sync dma_iova_destroy dma_iova_unlink; do
+		have_sym $s || { echo "two-step API present but $s missing; is IOMMU DMA support built?" >&2; exit 1; }
+	done
+else
+	MODE=legacy
+	MAIN=$HERE/bpf/dma-legacy.bt
+	for s in dma_map_sgtable dma_unmap_sg_attrs; do
+		have_sym $s || { echo "required symbol $s missing" >&2; exit 1; }
+	done
+fi
+if have_sym dma_map_phys; then
+	SEG=$HERE/bpf/seg-phys.bt
+else
+	SEG=$HERE/bpf/seg-page.bt
+	have_sym dma_map_page_attrs || { echo "neither dma_map_phys nor dma_map_page_attrs found" >&2; exit 1; }
+fi
+REQ=""
+if have_sym nvme_map_data && have_sym nvme_unmap_data; then
+	REQ=$HERE/bpf/nvme-req.bt
+fi
+
+SCRIPT=$(mktemp /tmp/kvspill-dmacost.XXXXXX.bt)
+cat "$MAIN" "$SEG" ${REQ:+"$REQ"} > "$SCRIPT"
+
+# ---- gates ------------------------------------------------------------------
+say "GATE kver=$(uname -r) dma_mode=$MODE seg_probe=$(basename "$SEG" .bt) nvme_req_probe=$([ -n "$REQ" ] && echo yes || echo inlined)"
+for ctrl in /sys/class/nvme/nvme*; do
+	[ -e "$ctrl/device" ] || continue
+	pcidev=$(basename "$(readlink -f "$ctrl/device")")
+	grp=$(readlink -f "/sys/bus/pci/devices/$pcidev/iommu_group" 2>/dev/null)
+	say "GATE $(basename "$ctrl") pci=$pcidev iommu_group_type=$([ -n "$grp" ] && cat "$grp/type" || echo none)"
+done
+say "GATE swiotlb_used=$(cat /sys/kernel/debug/swiotlb/io_tlb_used 2>/dev/null || echo n/a)"
+
+# ---- trace ------------------------------------------------------------------
+BT_OUT=$(mktemp /tmp/kvspill-dmacost.XXXXXX.out)
+bpftrace "$SCRIPT" > "$BT_OUT" 2>&1 &
+BT=$!
+# wait until the probes are attached before starting the load
+for _ in $(seq 1 100); do
+	grep -qE "tracing nvme devices|^Attaching" "$BT_OUT" 2>/dev/null && { sleep 1; break; }
+	kill -0 $BT 2>/dev/null || { cat "$BT_OUT" >&2; rm -f "$SCRIPT" "$BT_OUT"; exit 1; }
+	sleep 0.1
+done
+
+if [ -n "$DUR" ]; then
+	say "TRACE duration=${DUR}s"
+	sleep "$DUR"
+	RC=0
+else
+	say "TRACE cmd=$*"
+	"$@"
+	RC=$?
+	say "TRACE rc=$RC"
+fi
+
+kill -INT $BT
+wait $BT
+cat "$BT_OUT" >> "$OUT"
+rm -f "$SCRIPT" "$BT_OUT"
+echo "report: $OUT"
+exit $RC
