@@ -28,13 +28,13 @@ BEGIN
 kfunc:dma_map_sgtable
 /str(args.dev->driver->name) == "nvme"/
 {
-	@ts_map[args.sgt] = nsecs;
+	@ts_map[args.sgt] = (int64)nsecs;
 }
 
 kretfunc:dma_map_sgtable
 /@ts_map[args.sgt]/
 {
-	$d = (int64)(nsecs - @ts_map[args.sgt]);
+	$d = ((int64)nsecs - @ts_map[args.sgt]);
 	$n = args.sgt->orig_nents;
 	$b = $n <= 1 ? 1 : ($n <= 4 ? 4 : ($n <= 16 ? 16 :
 	     ($n <= 64 ? 64 : ($n <= 256 ? 256 : 1024))));
@@ -45,26 +45,26 @@ kretfunc:dma_map_sgtable
 	if (retval != 0) {
 		@map_fail = count();
 	}
-	delete(@ts_map[args.sgt]);
+	delete(@ts_map, args.sgt);
 }
 
 kfunc:dma_unmap_sg_attrs
 /str(args.dev->driver->name) == "nvme"/
 {
-	@ts_unmap[args.sg] = nsecs;
+	@ts_unmap[args.sg] = (int64)nsecs;
 }
 
 kretfunc:dma_unmap_sg_attrs
 /@ts_unmap[args.sg]/
 {
-	$d = (int64)(nsecs - @ts_unmap[args.sg]);
+	$d = ((int64)nsecs - @ts_unmap[args.sg]);
 	$n = args.nents;
 	$b = $n <= 1 ? 1 : ($n <= 4 ? 4 : ($n <= 16 ? 16 :
 	     ($n <= 64 ? 64 : ($n <= 256 ? 256 : 1024))));
 	@sg_unmap_ns[$b] = hist($d);
 	@sg_unmap_avg_ns[$b] = avg($d);
 	@sg_unmap_count[$b] = count();
-	delete(@ts_unmap[args.sg]);
+	delete(@ts_unmap, args.sg);
 }
 
 END

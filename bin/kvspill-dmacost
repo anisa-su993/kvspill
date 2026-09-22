@@ -99,7 +99,8 @@ fi
 kill -INT $BT
 wait $BT
 grep -E "^(ERROR|Attach)" "$BT_ERR" | tee -a "$OUT"
-cat "$BT_OUT" >> "$OUT"
+# bpftrace emits compile warnings on stdout as a 3-line block; drop them
+awk '/: WARNING: /{skip=2; next} skip>0{skip--; next} {print}' "$BT_OUT" >> "$OUT"
 rm -f "$SCRIPT" "$BT_OUT" "$BT_ERR"
 echo "report: $OUT"
 exit $RC

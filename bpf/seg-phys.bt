@@ -10,13 +10,13 @@
 kfunc:dma_map_phys
 /str(args.dev->driver->name) == "nvme"/
 {
-	@ts_seg[args.phys] = nsecs;
+	@ts_seg[args.phys] = (int64)nsecs;
 }
 
 kretfunc:dma_map_phys
 /@ts_seg[args.phys]/
 {
-	$d = (int64)(nsecs - @ts_seg[args.phys]);
+	$d = ((int64)nsecs - @ts_seg[args.phys]);
 	$kb = args.size / 1024;
 	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
 	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
@@ -24,19 +24,19 @@ kretfunc:dma_map_phys
 	@seg_map_ns[$b] = hist($d);
 	@seg_map_avg_ns[$b] = avg($d);
 	@seg_map_count[$b] = count();
-	delete(@ts_seg[args.phys]);
+	delete(@ts_seg, args.phys);
 }
 
 kfunc:dma_unmap_phys
 /str(args.dev->driver->name) == "nvme"/
 {
-	@ts_useg[args.addr] = nsecs;
+	@ts_useg[args.addr] = (int64)nsecs;
 }
 
 kretfunc:dma_unmap_phys
 /@ts_useg[args.addr]/
 {
-	$d = (int64)(nsecs - @ts_useg[args.addr]);
+	$d = ((int64)nsecs - @ts_useg[args.addr]);
 	$kb = args.size / 1024;
 	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
 	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
@@ -44,7 +44,7 @@ kretfunc:dma_unmap_phys
 	@seg_unmap_ns[$b] = hist($d);
 	@seg_unmap_avg_ns[$b] = avg($d);
 	@seg_unmap_count[$b] = count();
-	delete(@ts_useg[args.addr]);
+	delete(@ts_useg, args.addr);
 }
 
 END
