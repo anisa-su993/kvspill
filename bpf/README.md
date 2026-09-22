@@ -27,10 +27,14 @@ kvspill-dmacost --duration 30
 Map keys are upper-bound buckets: KiB of request or segment size for the
 two-step and per-segment maps, scatterlist entry count for the legacy maps.
 
-- `map_req_*` / `unmap_req_*` (two-step): whole-request cost on the IOVA
-  path. `path[iova]` vs `path[direct]` says which path requests took; if
-  `direct` dominates, the IOMMU is off or in passthrough and the per-segment
-  maps are where the cost is.
+- `map_req_*` / `unmap_req_*` (two-step): whole-request cost, keyed by
+  path then size. On the `iova` path the whole map happens inside
+  `blk_rq_dma_map_iter_start`, so `map_req_ns[iova, ...]` equals
+  `iter_start_ns`. On the `direct` path it is iter_start plus every
+  iter_next, flushed when the request object is next reused. `path[iova]`
+  vs `path[direct]` says which path requests took; if `direct` dominates,
+  the IOMMU is off or in passthrough and the per-segment maps carry the
+  unmap side.
 - `iova_alloc_ns`, `iova_link_ns`, `iova_sync_ns`: the three steps inside a
   two-step map. Link is per physical segment, so hugepage-backed buffers
   should show few links per request.
@@ -53,7 +57,11 @@ across domain types.
 
 - A request whose map fails midway never flushes its `map_req` entry; the
   `map_fail` counter records it instead.
-- Per-tid timestamps assume map and unmap calls do not nest on one thread,
-  which holds for nvme-pci.
+- Direct-path `map_req` entries are flushed lazily on request reuse, so
+  the handful in flight when tracing stops are dropped.
+- Probes are fentry/fexit keyed on the request, IOVA state, scatterlist or
+  address, so interrupt-context unmaps nesting inside task-context ones do
+  not corrupt timestamps. Per-thread keys did, and produced impossible
+  multi-day latencies in the first run.
 - The `nvme_*_data` probes disappear when the compiler inlines those
   functions; the GATE line says `nvme_req_probe=inlined` when that happens.

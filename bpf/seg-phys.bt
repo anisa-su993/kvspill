@@ -4,56 +4,51 @@
 // dma_map_page_attrs() is a wrapper around dma_map_phys() there, so this
 // one probe pair sees both the direct-path segments from blk-mq-dma and
 // the single-segment dma_map_bvec() fast path without double counting.
+// Keyed on the physical / DMA address so nested calls do not collide.
 // Keys are segment-size buckets in KiB (upper bound).
 
-kprobe:dma_map_phys
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:dma_map_phys
+/str(args.dev->driver->name) == "nvme"/
 {
-	@ts_seg[tid] = nsecs;
-	@seg_len[tid] = arg2;
+	@ts_seg[args.phys] = nsecs;
 }
 
-kretprobe:dma_map_phys
-/@ts_seg[tid]/
+kretfunc:dma_map_phys
+/@ts_seg[args.phys]/
 {
-	$d = nsecs - @ts_seg[tid];
-	$kb = @seg_len[tid] / 1024;
+	$d = (int64)(nsecs - @ts_seg[args.phys]);
+	$kb = args.size / 1024;
 	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
 	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
 	     ($kb <= 2048 ? 2048 : 8192)))));
 	@seg_map_ns[$b] = hist($d);
 	@seg_map_avg_ns[$b] = avg($d);
 	@seg_map_count[$b] = count();
-	delete(@ts_seg[tid]);
-	delete(@seg_len[tid]);
+	delete(@ts_seg[args.phys]);
 }
 
-kprobe:dma_unmap_phys
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:dma_unmap_phys
+/str(args.dev->driver->name) == "nvme"/
 {
-	@ts_useg[tid] = nsecs;
-	@useg_len[tid] = arg2;
+	@ts_useg[args.addr] = nsecs;
 }
 
-kretprobe:dma_unmap_phys
-/@ts_useg[tid]/
+kretfunc:dma_unmap_phys
+/@ts_useg[args.addr]/
 {
-	$d = nsecs - @ts_useg[tid];
-	$kb = @useg_len[tid] / 1024;
+	$d = (int64)(nsecs - @ts_useg[args.addr]);
+	$kb = args.size / 1024;
 	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
 	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
 	     ($kb <= 2048 ? 2048 : 8192)))));
 	@seg_unmap_ns[$b] = hist($d);
 	@seg_unmap_avg_ns[$b] = avg($d);
 	@seg_unmap_count[$b] = count();
-	delete(@ts_useg[tid]);
-	delete(@useg_len[tid]);
+	delete(@ts_useg[args.addr]);
 }
 
 END
 {
 	clear(@ts_seg);
-	clear(@seg_len);
 	clear(@ts_useg);
-	clear(@useg_len);
 }

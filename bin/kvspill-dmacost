@@ -74,12 +74,14 @@ say "GATE swiotlb_used=$(cat /sys/kernel/debug/swiotlb/io_tlb_used 2>/dev/null |
 
 # ---- trace ------------------------------------------------------------------
 BT_OUT=$(mktemp /tmp/kvspill-dmacost.XXXXXX.out)
-bpftrace "$SCRIPT" > "$BT_OUT" 2>&1 &
+BT_ERR=$(mktemp /tmp/kvspill-dmacost.XXXXXX.err)
+# compiler warnings and the attach banner go to stderr; keep them out of the report
+bpftrace "$SCRIPT" > "$BT_OUT" 2> "$BT_ERR" &
 BT=$!
 # wait until the probes are attached before starting the load
 for _ in $(seq 1 100); do
-	grep -qE "tracing nvme devices|^Attaching" "$BT_OUT" 2>/dev/null && { sleep 1; break; }
-	kill -0 $BT 2>/dev/null || { cat "$BT_OUT" >&2; rm -f "$SCRIPT" "$BT_OUT"; exit 1; }
+	grep -qE "tracing nvme devices|^Attach" "$BT_OUT" "$BT_ERR" 2>/dev/null && { sleep 1; break; }
+	kill -0 $BT 2>/dev/null || { cat "$BT_ERR" "$BT_OUT" >&2; rm -f "$SCRIPT" "$BT_OUT" "$BT_ERR"; exit 1; }
 	sleep 0.1
 done
 
@@ -96,7 +98,8 @@ fi
 
 kill -INT $BT
 wait $BT
+grep -E "^(ERROR|Attach)" "$BT_ERR" | tee -a "$OUT"
 cat "$BT_OUT" >> "$OUT"
-rm -f "$SCRIPT" "$BT_OUT"
+rm -f "$SCRIPT" "$BT_OUT" "$BT_ERR"
 echo "report: $OUT"
 exit $RC

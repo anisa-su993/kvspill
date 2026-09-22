@@ -7,34 +7,33 @@
 // total; the API-level maps say where inside it the time went.
 //
 // Both are static and may be inlined; kvspill-dmacost only appends this
-// fragment when they are present in kallsyms. Signatures differ between
-// eras (request is arg2 before v6.17, arg0 after), so only latency is
-// recorded, not size.
+// fragment when they are present in kallsyms. The request argument is
+// named "req" in both eras, so keying on args.req works on either.
 
-kprobe:nvme_map_data
+kfunc:nvme_map_data
 {
-	@ts_nmap[tid] = nsecs;
+	@ts_nmap[args.req] = nsecs;
 }
 
-kretprobe:nvme_map_data
-/@ts_nmap[tid]/
+kretfunc:nvme_map_data
+/@ts_nmap[args.req]/
 {
-	@nvme_map_ns = hist(nsecs - @ts_nmap[tid]);
-	@nvme_map_avg_ns = avg(nsecs - @ts_nmap[tid]);
-	delete(@ts_nmap[tid]);
+	@nvme_map_ns = hist((int64)(nsecs - @ts_nmap[args.req]));
+	@nvme_map_avg_ns = avg((int64)(nsecs - @ts_nmap[args.req]));
+	delete(@ts_nmap[args.req]);
 }
 
-kprobe:nvme_unmap_data
+kfunc:nvme_unmap_data
 {
-	@ts_nunmap[tid] = nsecs;
+	@ts_nunmap[args.req] = nsecs;
 }
 
-kretprobe:nvme_unmap_data
-/@ts_nunmap[tid]/
+kretfunc:nvme_unmap_data
+/@ts_nunmap[args.req]/
 {
-	@nvme_unmap_ns = hist(nsecs - @ts_nunmap[tid]);
-	@nvme_unmap_avg_ns = avg(nsecs - @ts_nunmap[tid]);
-	delete(@ts_nunmap[tid]);
+	@nvme_unmap_ns = hist((int64)(nsecs - @ts_nunmap[args.req]));
+	@nvme_unmap_avg_ns = avg((int64)(nsecs - @ts_nunmap[args.req]));
+	delete(@ts_nunmap[args.req]);
 }
 
 END

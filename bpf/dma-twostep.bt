@@ -6,7 +6,7 @@
 // Map side, per request:  blk_rq_dma_map_iter_start() tries
 // dma_iova_try_alloc(); on success the whole request is linked into one
 // IOVA range (dma_iova_link per physical segment, then dma_iova_sync) and
-// blk_rq_dma_map_iter_next() has nothing left to do. If the IOVA path is
+// the driver never needs blk_rq_dma_map_iter_next(). If the IOVA path is
 // unavailable (no IOMMU, passthrough, swiotlb) each segment is mapped
 // directly instead: iter_start maps the first, iter_next the rest.
 //
@@ -17,161 +17,167 @@
 // and show up only in the per-segment maps supplied by the seg-*.bt fragment
 // that kvspill-dmacost appends.
 //
+// Probes are fentry/fexit (kfunc) so the exit probe can see the arguments;
+// timestamps are keyed on the request or IOVA state, not the thread, so an
+// unmap in interrupt context nesting inside one in task context on the same
+// CPU cannot clobber it.
+//
 // Only devices bound to the "nvme" driver are traced. Needs kernel BTF.
-// Keys of the *_ns maps are request-size buckets in KiB (upper bound).
+// Keys of the *_req_* maps are (path, request-size bucket in KiB, upper bound).
 
 BEGIN
 {
 	printf("two-step DMA: tracing nvme devices, Ctrl-C to report\n");
 }
 
-// ---- whole-request map cost: iter_start + every iter_next -------------
+// ---- whole-request map cost --------------------------------------------
+//
+// IOVA path: iter_start does all the work, so its duration is flushed at
+// once. Direct path: the driver's PRP loop stops calling iter_next when the
+// request is consumed, so there is no end-of-map signal; the running sum is
+// flushed lazily when the same request object is mapped again (tags are
+// reused constantly). The last few in flight at exit are lost.
 
-kprobe:blk_rq_dma_map_iter_start
-/str(((struct device *)arg1)->driver->name) == "nvme"/
+kfunc:blk_rq_dma_map_iter_start
+/str(args.dma_dev->driver->name) == "nvme"/
 {
-	@rq[tid] = arg0;
-	@rq_sz[arg0] = ((struct request *)arg0)->__data_len;
-	@rq_ns[arg0] = (uint64)0;
-	@ts_start[tid] = nsecs;
-}
-
-kretprobe:blk_rq_dma_map_iter_start
-/@ts_start[tid]/
-{
-	$d = nsecs - @ts_start[tid];
-	$r = @rq[tid];
-	delete(@ts_start[tid]);
-	delete(@rq[tid]);
-
-	@iter_start_ns = hist($d);
-	@rq_ns[$r] += $d;
-	if (retval == 0) {
-		// mapping failed; nothing further will flush this request
-		@map_fail = count();
-		delete(@rq_ns[$r]);
-		delete(@rq_sz[$r]);
-	}
-}
-
-kprobe:blk_rq_dma_map_iter_next
-/@rq_sz[arg0]/
-{
-	@rq[tid] = arg0;
-	@ts_next[tid] = nsecs;
-}
-
-kretprobe:blk_rq_dma_map_iter_next
-/@ts_next[tid]/
-{
-	$d = nsecs - @ts_next[tid];
-	$r = @rq[tid];
-	delete(@ts_next[tid]);
-	delete(@rq[tid]);
-
-	@iter_next_ns = hist($d);
-	@rq_ns[$r] += $d;
-
-	// false == iteration finished: the request is fully mapped
-	if (retval == 0) {
-		$kb = @rq_sz[$r] / 1024;
+	if (@rq_ns[args.req]) {
+		$kb = @rq_sz[args.req] / 1024;
 		$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
 		     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
 		     ($kb <= 2048 ? 2048 : 8192)))));
-		@map_req_ns[$b] = hist(@rq_ns[$r]);
-		@map_req_avg_ns[$b] = avg(@rq_ns[$r]);
-		@map_req_count[$b] = count();
-		delete(@rq_ns[$r]);
-		delete(@rq_sz[$r]);
+		@map_req_ns["direct", $b] = hist(@rq_ns[args.req]);
+		@map_req_avg_ns["direct", $b] = avg(@rq_ns[args.req]);
+		@map_req_count["direct", $b] = count();
+		delete(@rq_ns[args.req]);
+		delete(@rq_sz[args.req]);
+	}
+	@ts_start[args.req] = nsecs;
+}
+
+kretfunc:blk_rq_dma_map_iter_start
+/@ts_start[args.req]/
+{
+	$d = (int64)(nsecs - @ts_start[args.req]);
+	$sz = args.req->__data_len;
+	$kb = $sz / 1024;
+	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
+	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
+	     ($kb <= 2048 ? 2048 : 8192)))));
+	delete(@ts_start[args.req]);
+	@iter_start_ns = hist($d);
+
+	if (retval == 0) {
+		@map_fail = count();
+	} else if (args.state->addr != 0) {
+		// dma_use_iova(): the whole request is mapped
+		@map_req_ns["iova", $b] = hist($d);
+		@map_req_avg_ns["iova", $b] = avg($d);
+		@map_req_count["iova", $b] = count();
+	} else {
+		@rq_ns[args.req] = $d;
+		@rq_sz[args.req] = $sz;
 	}
 }
 
-// ---- IOVA path primitives ----------------------------------------------
-
-kprobe:dma_iova_try_alloc
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:blk_rq_dma_map_iter_next
+/@rq_sz[args.req]/
 {
-	@ts_alloc[tid] = nsecs;
+	@ts_next[args.req] = nsecs;
 }
 
-kretprobe:dma_iova_try_alloc
-/@ts_alloc[tid]/
+kretfunc:blk_rq_dma_map_iter_next
+/@ts_next[args.req]/
 {
-	@iova_alloc_ns = hist(nsecs - @ts_alloc[tid]);
+	$d = (int64)(nsecs - @ts_next[args.req]);
+	delete(@ts_next[args.req]);
+	@iter_next_ns = hist($d);
+	@rq_ns[args.req] += $d;
+}
+
+// ---- IOVA path primitives, keyed on the per-request dma_iova_state -----
+
+kfunc:dma_iova_try_alloc
+/str(args.dev->driver->name) == "nvme"/
+{
+	@ts_alloc[args.state] = nsecs;
+}
+
+kretfunc:dma_iova_try_alloc
+/@ts_alloc[args.state]/
+{
+	@iova_alloc_ns = hist((int64)(nsecs - @ts_alloc[args.state]));
+	@iova_alloc_avg_ns = avg((int64)(nsecs - @ts_alloc[args.state]));
 	@path[retval ? "iova" : "direct"] = count();
-	delete(@ts_alloc[tid]);
+	delete(@ts_alloc[args.state]);
 }
 
-kprobe:dma_iova_link
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:dma_iova_link
+/str(args.dev->driver->name) == "nvme"/
 {
-	@ts_link[tid] = nsecs;
-	@iova_link_bytes = sum(arg4);
+	@ts_link[args.state] = nsecs;
+	@iova_link_bytes = sum(args.size);
 }
 
-kretprobe:dma_iova_link
-/@ts_link[tid]/
+kretfunc:dma_iova_link
+/@ts_link[args.state]/
 {
-	@iova_link_ns = hist(nsecs - @ts_link[tid]);
-	@iova_link_avg_ns = avg(nsecs - @ts_link[tid]);
-	delete(@ts_link[tid]);
+	@iova_link_ns = hist((int64)(nsecs - @ts_link[args.state]));
+	@iova_link_avg_ns = avg((int64)(nsecs - @ts_link[args.state]));
+	delete(@ts_link[args.state]);
 }
 
-kprobe:dma_iova_sync
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:dma_iova_sync
+/str(args.dev->driver->name) == "nvme"/
 {
-	@ts_sync[tid] = nsecs;
+	@ts_sync[args.state] = nsecs;
 }
 
-kretprobe:dma_iova_sync
-/@ts_sync[tid]/
+kretfunc:dma_iova_sync
+/@ts_sync[args.state]/
 {
-	@iova_sync_ns = hist(nsecs - @ts_sync[tid]);
-	@iova_sync_avg_ns = avg(nsecs - @ts_sync[tid]);
-	delete(@ts_sync[tid]);
+	@iova_sync_ns = hist((int64)(nsecs - @ts_sync[args.state]));
+	@iova_sync_avg_ns = avg((int64)(nsecs - @ts_sync[args.state]));
+	delete(@ts_sync[args.state]);
 }
 
 // ---- IOVA path unmap: one dma_iova_destroy() per request ---------------
 
-kprobe:dma_iova_destroy
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:dma_iova_destroy
+/str(args.dev->driver->name) == "nvme"/
 {
-	@ts_destroy[tid] = nsecs;
-	@destroy_len[tid] = arg2;
+	@ts_destroy[args.state] = nsecs;
 }
 
-kretprobe:dma_iova_destroy
-/@ts_destroy[tid]/
+kretfunc:dma_iova_destroy
+/@ts_destroy[args.state]/
 {
-	$d = nsecs - @ts_destroy[tid];
-	$kb = @destroy_len[tid] / 1024;
+	$d = (int64)(nsecs - @ts_destroy[args.state]);
+	$kb = args.mapped_len / 1024;
 	$b = $kb <= 4 ? 4 : ($kb <= 64 ? 64 : ($kb <= 128 ? 128 :
 	     ($kb <= 512 ? 512 : ($kb <= 1024 ? 1024 :
 	     ($kb <= 2048 ? 2048 : 8192)))));
-	@unmap_req_ns[$b] = hist($d);
-	@unmap_req_avg_ns[$b] = avg($d);
-	@unmap_req_count[$b] = count();
-	delete(@ts_destroy[tid]);
-	delete(@destroy_len[tid]);
+	@unmap_req_ns["iova", $b] = hist($d);
+	@unmap_req_avg_ns["iova", $b] = avg($d);
+	@unmap_req_count["iova", $b] = count();
+	delete(@ts_destroy[args.state]);
 }
 
 // error-path unlink (partial map failed); should stay at zero
-kprobe:dma_iova_unlink
-/str(((struct device *)arg0)->driver->name) == "nvme"/
+kfunc:dma_iova_unlink
+/str(args.dev->driver->name) == "nvme"/
 {
 	@iova_unlink = count();
 }
 
 END
 {
-	clear(@rq);
-	clear(@rq_sz);
 	clear(@rq_ns);
+	clear(@rq_sz);
 	clear(@ts_start);
 	clear(@ts_next);
 	clear(@ts_alloc);
 	clear(@ts_link);
 	clear(@ts_sync);
 	clear(@ts_destroy);
-	clear(@destroy_len);
 }
