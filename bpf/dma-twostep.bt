@@ -112,19 +112,23 @@ kretfunc:dma_iova_try_alloc
 	delete(@ts_alloc[args.state]);
 }
 
-kfunc:dma_iova_link
-/str(args.dev->driver->name) == "nvme"/
+// dma_iova_link is missing from BTF on at least Debian 7.1 (pahole drops
+// functions with optimised-out parameters), so use kprobes here. Keying on
+// tid is safe for this one: linking only runs in submission context and
+// never nests inside an interrupt-context call.
+kprobe:dma_iova_link
+/str(((struct device *)arg0)->driver->name) == "nvme"/
 {
-	@ts_link[args.state] = nsecs;
-	@iova_link_bytes = sum(args.size);
+	@ts_link[tid] = nsecs;
+	@iova_link_bytes = sum(arg4);
 }
 
-kretfunc:dma_iova_link
-/@ts_link[args.state]/
+kretprobe:dma_iova_link
+/@ts_link[tid]/
 {
-	@iova_link_ns = hist((int64)(nsecs - @ts_link[args.state]));
-	@iova_link_avg_ns = avg((int64)(nsecs - @ts_link[args.state]));
-	delete(@ts_link[args.state]);
+	@iova_link_ns = hist((int64)(nsecs - @ts_link[tid]));
+	@iova_link_avg_ns = avg((int64)(nsecs - @ts_link[tid]));
+	delete(@ts_link[tid]);
 }
 
 kfunc:dma_iova_sync
