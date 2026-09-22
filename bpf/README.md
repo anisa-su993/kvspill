@@ -9,7 +9,10 @@ probe set from the running kernel:
 | < v6.17 | `dma-legacy.bt` | one `dma_map_sgtable()` / `dma_unmap_sg_attrs()` pair |
 | >= v6.17 | `dma-twostep.bt` | `blk_rq_dma_map_iter_start()` plus every `iter_next()`; `dma_iova_destroy()` to unmap |
 
-plus one per-segment fragment (`seg-phys.bt` on >= v6.18 where
+plus, on the two-step kernels, `twostep-inner.bt` with the
+`dma_iova_{try_alloc,link,sync}` breakdown (omit it with `--no-inner` for
+the cleanest whole-request number, since those probes nest inside
+iter_start and add a microsecond or two to it), one per-segment fragment (`seg-phys.bt` on >= v6.18 where
 `dma_map_phys()` exists, `seg-page.bt` otherwise) and, when the symbols are
 not inlined, `nvme-req.bt` for the driver-level `nvme_map_data()` /
 `nvme_unmap_data()` totals that exist on both eras.
@@ -19,6 +22,7 @@ for the struct casts. Run as root.
 
 ```
 kvspill-dmacost -- fio workloads/kv-restore.fio
+kvspill-dmacost --no-inner -- fio workloads/kv-restore.fio
 kvspill-dmacost --duration 30
 ```
 

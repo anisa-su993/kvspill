@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//
+// Breakdown of a two-step map into its IOVA primitives. Appended to
+// dma-twostep.bt by kvspill-dmacost unless --no-inner is given. These
+// probes nest inside blk_rq_dma_map_iter_start and add their own overhead
+// to its measured duration.
+
+// ---- IOVA path primitives, keyed on the per-request dma_iova_state -----
+
+kfunc:dma_iova_try_alloc
+/str(args.dev->driver->name) == "nvme"/
+{
+	@ts_alloc[args.state] = (int64)nsecs;
+}
+
+kretfunc:dma_iova_try_alloc
+/@ts_alloc[args.state]/
+{
+	if (!retval) {
+		@iova_alloc_fail = count();
+	}
+	@iova_alloc_ns = hist(((int64)nsecs - @ts_alloc[args.state]));
+	@iova_alloc_avg_ns = avg(((int64)nsecs - @ts_alloc[args.state]));
+		delete(@ts_alloc, args.state);
+}
+
+// dma_iova_link is missing from BTF on at least Debian 7.1 (pahole drops
+// functions with optimised-out parameters), so use kprobes here. Keying on
+// tid is safe for this one: linking only runs in submission context and
+// never nests inside an interrupt-context call.
+kprobe:dma_iova_link
+/str(((struct device *)arg0)->driver->name) == "nvme"/
+{
+	@ts_link[tid] = (int64)nsecs;
+	@iova_link_bytes = sum(arg4);
+}
+
+kretprobe:dma_iova_link
+/@ts_link[tid]/
+{
+	@iova_link_ns = hist(((int64)nsecs - @ts_link[tid]));
+	@iova_link_avg_ns = avg(((int64)nsecs - @ts_link[tid]));
+	delete(@ts_link, tid);
+}
+
+kfunc:dma_iova_sync
+/str(args.dev->driver->name) == "nvme"/
+{
+	@ts_sync[args.state] = (int64)nsecs;
+}
+
+kretfunc:dma_iova_sync
+/@ts_sync[args.state]/
+{
+	@iova_sync_ns = hist(((int64)nsecs - @ts_sync[args.state]));
+	@iova_sync_avg_ns = avg(((int64)nsecs - @ts_sync[args.state]));
+	delete(@ts_sync, args.state);
+}
+
+END
+{
+	clear(@ts_alloc);
+	clear(@ts_link);
+	clear(@ts_sync);
+}

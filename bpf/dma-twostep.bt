@@ -13,6 +13,11 @@
 // Unmap side: dma_iova_destroy() for the IOVA path (one call per request),
 // or per-segment dma_unmap_{phys,page_attrs} on the direct path.
 //
+// The dma_iova_{try_alloc,link,sync} breakdown lives in twostep-inner.bt;
+// kvspill-dmacost appends it unless --no-inner is given. Those probes nest
+// inside iter_start and inflate its measured duration by a microsecond or
+// two, so use --no-inner for the cleanest whole-request number.
+//
 // Single-segment requests skip the iterator entirely (nvme_pci_setup_data_simple)
 // and show up only in the per-segment maps supplied by the seg-*.bt fragment
 // that kvspill-dmacost appends.
@@ -71,10 +76,12 @@ kretfunc:blk_rq_dma_map_iter_start
 		@map_fail = count();
 	} else if (args.state->addr != 0) {
 		// dma_use_iova(): the whole request is mapped
+		@path["iova"] = count();
 		@map_req_ns["iova", $b] = hist($d);
 		@map_req_avg_ns["iova", $b] = avg($d);
 		@map_req_count["iova", $b] = count();
 	} else {
+		@path["direct"] = count();
 		@rq_ns[args.req] = $d;
 		@rq_sz[args.req] = $sz;
 	}
@@ -93,56 +100,6 @@ kretfunc:blk_rq_dma_map_iter_next
 	delete(@ts_next, args.req);
 	@iter_next_ns = hist($d);
 	@rq_ns[args.req] += $d;
-}
-
-// ---- IOVA path primitives, keyed on the per-request dma_iova_state -----
-
-kfunc:dma_iova_try_alloc
-/str(args.dev->driver->name) == "nvme"/
-{
-	@ts_alloc[args.state] = (int64)nsecs;
-}
-
-kretfunc:dma_iova_try_alloc
-/@ts_alloc[args.state]/
-{
-	@iova_alloc_ns = hist(((int64)nsecs - @ts_alloc[args.state]));
-	@iova_alloc_avg_ns = avg(((int64)nsecs - @ts_alloc[args.state]));
-	@path[retval ? "iova" : "direct"] = count();
-	delete(@ts_alloc, args.state);
-}
-
-// dma_iova_link is missing from BTF on at least Debian 7.1 (pahole drops
-// functions with optimised-out parameters), so use kprobes here. Keying on
-// tid is safe for this one: linking only runs in submission context and
-// never nests inside an interrupt-context call.
-kprobe:dma_iova_link
-/str(((struct device *)arg0)->driver->name) == "nvme"/
-{
-	@ts_link[tid] = (int64)nsecs;
-	@iova_link_bytes = sum(arg4);
-}
-
-kretprobe:dma_iova_link
-/@ts_link[tid]/
-{
-	@iova_link_ns = hist(((int64)nsecs - @ts_link[tid]));
-	@iova_link_avg_ns = avg(((int64)nsecs - @ts_link[tid]));
-	delete(@ts_link, tid);
-}
-
-kfunc:dma_iova_sync
-/str(args.dev->driver->name) == "nvme"/
-{
-	@ts_sync[args.state] = (int64)nsecs;
-}
-
-kretfunc:dma_iova_sync
-/@ts_sync[args.state]/
-{
-	@iova_sync_ns = hist(((int64)nsecs - @ts_sync[args.state]));
-	@iova_sync_avg_ns = avg(((int64)nsecs - @ts_sync[args.state]));
-	delete(@ts_sync, args.state);
 }
 
 // ---- IOVA path unmap: one dma_iova_destroy() per request ---------------
@@ -180,8 +137,5 @@ END
 	clear(@rq_sz);
 	clear(@ts_start);
 	clear(@ts_next);
-	clear(@ts_alloc);
-	clear(@ts_link);
-	clear(@ts_sync);
 	clear(@ts_destroy);
 }

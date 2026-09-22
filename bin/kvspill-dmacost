@@ -8,17 +8,20 @@ set -u
 
 usage() {
 	cat >&2 <<USAGE
-usage: $0 [--out FILE] -- <command...>
-       $0 [--out FILE] --duration SECONDS
+usage: $0 [--out FILE] [--no-inner] -- <command...>
+       $0 [--out FILE] [--no-inner] --duration SECONDS
+  --no-inner  skip the dma_iova_{try_alloc,link,sync} breakdown probes, which
+              nest inside iter_start and inflate its measured duration
 USAGE
 	exit 1
 }
 
-OUT=""; DUR=""
+OUT=""; DUR=""; INNER=1
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--out) OUT=$2; shift 2 ;;
 	--duration) DUR=$2; shift 2 ;;
+	--no-inner) INNER=0; shift ;;
 	--) shift; break ;;
 	*) usage ;;
 	esac
@@ -35,12 +38,14 @@ say() { echo "$@" | tee -a "$OUT"; }
 have_sym() { grep -qE " [tT] $1\$" /proc/kallsyms; }
 
 # ---- choose probe set from the running kernel ------------------------------
+INNERBT=""
 if have_sym blk_rq_dma_map_iter_start; then
 	MODE=twostep
 	MAIN=$HERE/bpf/dma-twostep.bt
 	for s in dma_iova_try_alloc dma_iova_link dma_iova_sync dma_iova_destroy dma_iova_unlink; do
 		have_sym $s || { echo "two-step API present but $s missing; is IOMMU DMA support built?" >&2; exit 1; }
 	done
+	[ "$INNER" -eq 1 ] && INNERBT=$HERE/bpf/twostep-inner.bt
 else
 	MODE=legacy
 	MAIN=$HERE/bpf/dma-legacy.bt
@@ -60,10 +65,10 @@ if have_sym nvme_map_data && have_sym nvme_unmap_data; then
 fi
 
 SCRIPT=$(mktemp /tmp/kvspill-dmacost.XXXXXX.bt)
-cat "$MAIN" "$SEG" ${REQ:+"$REQ"} > "$SCRIPT"
+cat "$MAIN" ${INNERBT:+"$INNERBT"} "$SEG" ${REQ:+"$REQ"} > "$SCRIPT"
 
 # ---- gates ------------------------------------------------------------------
-say "GATE kver=$(uname -r) dma_mode=$MODE seg_probe=$(basename "$SEG" .bt) nvme_req_probe=$([ -n "$REQ" ] && echo yes || echo inlined)"
+say "GATE kver=$(uname -r) dma_mode=$MODE inner_probes=$([ -n "$INNERBT" ] && echo yes || echo no) seg_probe=$(basename "$SEG" .bt) nvme_req_probe=$([ -n "$REQ" ] && echo yes || echo inlined)"
 for ctrl in /sys/class/nvme/nvme*; do
 	[ -e "$ctrl/device" ] || continue
 	pcidev=$(basename "$(readlink -f "$ctrl/device")")
